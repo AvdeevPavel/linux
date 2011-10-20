@@ -12,7 +12,7 @@ file_exist(){
   fi
 }
 
-check_rep(){
+check_rep(){ 
 # checks existance of $1 directory
   if ! [ -d $1 ]; then
     echo "$0: $1: Not under a version control"; exit 2;
