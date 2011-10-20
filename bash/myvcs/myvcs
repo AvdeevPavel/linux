@@ -1,0 +1,159 @@
+#!/bin/bash
+
+current_revision_file="current_revision"
+max_revision_file="max_revision"
+options_file=".myvcs.cfg"
+
+file_exist(){
+  if ! [ -f $1 ]
+  then
+    echo "$0: $1: No such file"
+    exit 1
+  fi
+}
+
+check_rep(){
+# checks existance of $1 directory
+  if ! [ -d $1 ]; then
+    echo "$0: $1: Not under a version control"; exit 2;
+  fi
+  if [ ! -f $1/$current_revision_file ] || [ ! -f $1/$max_revision_file ] || [ ! -f $1/$options_file ]; then
+    echo "$0: $1: Corrupted repository"; exit 2
+  fi
+}
+
+VCSinit() {
+  for file in "$@"; do
+    file_exist $file
+    repdir=.$file
+    mkdir $repdir
+    touch $repdir/$current_revision_file
+    touch $repdir/$max_revision_file
+    touch $repdir/$options_file
+  done
+}
+VCScommit() {
+  for file in "$@"; do
+    file_exist $file
+    repdir=.$file
+    check_rep $repdir
+    if [ ! -s $repdir/$options_file ]; then
+      cp $file $repdir/$max_revision_file
+      cp $file $repdir/$current_revision_file
+      { echo "current_revision_number=0"; echo "max_revision_number=0";} > $repdir/$options_file
+    else
+      while read line; do	
+        # ignore comment lines
+	echo "$line" | grep "^#" > /dev/null 2>&1 && continue
+        # if not empty, set the property using declare
+	[ ! -z "$line" ] && declare $line
+      done < $repdir/$options_file
+      
+      max_revision_number=$((max_revision_number + 1))
+      current_revision_number=$max_revision_number
+      diff -u $repdir/$max_revision_file $file > $repdir/revision_${max_revision_number}
+      cp $file $repdir/$max_revision_file
+      cp $file $repdir/$current_revision_file
+      { echo "current_revision_number=$current_revision_number"; echo "max_revision_number=$max_revision_number";} > $repdir/$options_file
+    fi
+  done
+}
+
+VCSstatus() {
+  status=0
+  for file in "$@"; do
+    file_exist $file
+    repdir=.$file
+    check_rep $repdir
+    diff $file $repdir/$current_revision_file > /dev/null 2>&1
+    if [ $? -ne 0 ]; then
+      echo "M $file"
+      status=1
+    fi
+  done
+  exit $status
+}
+VCSdiff() {
+  for file in "$@"; do
+    file_exist $file
+    repdir=.$file
+    check_rep $repdir
+    diff $repdir/$current_revision_file $file -u
+  done
+}
+VCSupdate() {
+  file=$1
+  repdir=.$file
+  check_rep $repdir
+
+  while read line; do	
+    # ignore comment lines
+    echo "$line" | grep "^#" > /dev/null 2>&1 && continue
+    # if not empty, set the property using declare
+    [ ! -z "$line" ] && declare $line
+  done < $repdir/$options_file
+
+  if [ $# -lt 2 ]; then
+    version=$max_revision_number
+  else
+    version=$2
+    if [ $version -gt $max_revision_number ]; then
+      echo "Too high revision"; exit 2
+    fi
+  fi
+  temp_file=temp
+  cp $repdir/$max_revision_file $repdir/$temp_file
+  for ((i=max_revision_number; i > version; i--)); do
+    patch -uR $repdir/$temp_file $repdir/revision_$i > /dev/null 2>&1
+  done
+  cp $repdir/$temp_file $file
+  cp $repdir/$temp_file $repdir/$current_revision_file
+  current_revision_number=$version
+  { echo "current_revision_number=$current_revision_number"; echo "max_revision_number=$max_revision_number";} > $repdir/$options_file
+  rm $repdir/$temp_file
+}
+VCShelp() {
+  echo "VCS"
+  echo "Useful commands: init,commit,status,diff,update"
+  echo "   init - initialize repository"
+  echo "   commit - save current version of file as new revision"
+  echo "   status - prints current status of file"
+  echo "   diff - prints unified diff of file"
+  echo "   update - select revision"
+}
+check_parameters() {
+  if [ $# -eq 0 ]; then
+    echo "Using: $0 command [args]"; exit 128;
+  fi
+}
+main() {
+  check_parameters "$@"
+  command=$1
+  shift
+  case $command in
+      init)
+	  VCSinit "$@"
+	  ;;
+      commit)
+	  VCScommit "$@"
+	  ;;
+      status)
+	  VCSstatus "$@"
+	  ;;
+      diff)
+	  VCSdiff "$@"
+	  ;;
+      update)
+	  VCSupdate "$@"
+	  ;;
+      help)
+	  VCShelp "$@"
+	  ;;
+      *)
+	  VCShelp "$@"
+	  exit 128
+	  ;;
+  esac
+  exit 0;
+}
+main "$@"
