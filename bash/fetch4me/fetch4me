@@ -1,0 +1,311 @@
+#!/bin/bash -e
+
+## Default values
+DEFAULT_QQEDIR="${HOME}/.fetch4me"
+DEFAULT_GETELEMFUNC="wget"
+
+## files and dirs
+base_downloadpath="${HOME}/Downloads/fetched4you"
+settings_file="${HOME}/.fetch4merc"
+queue_file=".queue"
+status_file=".status"
+finished_file=".finished"
+pid_file=".pid"
+
+## Error consts
+E_INVALID_ARG=2
+E_NO_ARG_PRESENT=3
+E_NO_URL_WITH_REFERER=4
+E_NO_URL_WITH_STARTED_DAEMON=5
+E_ABORTED_FILE_OPERATION=6
+E_CANNOT_ACCESS_DIRECTORY=7
+E_INVALID_GETELEMFUNC=8
+E_BAD_DOWLOAD=9
+
+## Global vars
+QQEDIR="${DEFAULT_QQEDIR}"
+GETELEMFUNC="${DEFAULT_GETELEMFUNC}"
+
+## Utility functions
+function perror() {
+    case "$1" in
+    "$E_INVALID_ARG")
+            echo "Incorrect argument: $2" >&2
+            ;;
+    "$E_NO_ARG_PRESENT")
+            echo "Arg not presented for option: $2" >&2
+            ;;
+    "$E_NO_URL_WITH_REFERER")
+            echo "No one URL is given with referer" >&2
+            ;;
+
+    "$E_NO_URL_WITH_STARTED_DAEMON")
+            echo "Daemon already started; No URL is given" >&2
+            ;;
+
+    "$E_ABORTED_FILE_OPERATION")
+            echo "File operation is broken $2" >&2
+            ;;
+        
+    "$E_CANNOT_ACCESS_DIRECTORY")
+            echo "Cannot access directory: $2" >&2
+            ;;
+    "$E_INVALID_GETELEMFUNC")
+            echo "No such function: $2" >&2
+            ;;
+    *)
+            echo "Unknown error" >&2
+            ;;                        
+    esac
+}
+
+## Client functions 
+function defined_property() {
+    local useful_properties=("QQEDIR" "GETELEMFUNC")
+    for uf_prop in "$useful_properties[@]"; do
+        if echo "$1" | grep "^${uf_prop}=" &>/dev/null; then
+            return 0
+        fi        
+    done
+    return 1
+}
+
+function read_settings() {
+    if [ -f "$settings_file" ]; then
+        while read propline; do
+            ! echo "$propline" | grep "^#" &>/dev/null && defined_property "$propline" && eval "$propline"
+        done < "$settings_file"
+    else
+        echo -e "QQEDIR=${DEFAULT_QQEDIR}\nGETELEMFUNC=${DEFAULT_GETELEMFUNC}" > "$settings_file"
+    fi
+    return 0
+}
+
+
+process_args() {
+    while [ $# -ne 0 ]; do
+        local option="$1"
+        case "$option" in
+        -w)
+                # QQEDIR
+                shift
+                if [ $# -eq 0 ]; then
+                    # no arg present
+                    perror "$E_NO_ARG_PRESENT" "$option"
+                    exit "$E_NO_ARG_PRESENT"
+                fi
+                if is_path "$1"; then
+                    QQEDIR="$1"
+                else
+                    # arg is not path
+                    perror "$E_INVALID_ARG" "$1"
+                    exit "$E_INVALID_ARG"                    
+                fi
+                ;;
+        -r)
+                # referer
+                shift
+                if [ $# -eq 0 ]; then
+                    # no arg present
+                    perror "$E_NO_ARG_PRESENT" "$option"
+                    exit "$E_NO_ARG_PRESENT"
+                fi
+                if wget --spider "$1" &>/dev/null; then
+                    REFERER="$1"
+                    HAS_REFERER=1
+                else
+                    perror "$E_INVALID_ARG" "$1"
+                    exit "$E_INVALID_ARG"
+                fi
+                ;;
+        *)
+                # url
+                if ! wget --spider "$1" &>/dev/null; then
+                    # not a url
+                    perror "$E_INVALID_ARG" "$1"
+                    exit "$E_INVALID_ARG"
+                fi
+                if [ -z "$URLS" ]; then
+                    URLS=("$1")
+                else
+                    echo "URLS already created"
+                    URLS["${#URLS[@]}"]="$1"
+                fi
+                ;;
+        esac
+        shift
+    done
+    if [ ! -z "$HAS_REFERER" ] && [ ${#URLS[@]} -eq 0 ]; then
+        # has referer, but no one urls
+        perror "$E_NO_URL_WITH_REFERER"
+        exit "$E_NO_URL_WITH_REFERER"
+    fi
+}
+
+function enqueue() {
+    for i in "${URLS[@]}"; do
+        local request_file=.request$(date "+%s_%N")
+        echo "url=$i referer=$REFERER" > "${QQEDIR}/${request_file}" || {
+            perror "$E_ABORTED_FILE_OPERATION" "${QQEDIR}/${request_file}"
+            exit "$E_ABORTED_FILE_OPERATION"
+        }
+        mv "${QQEDIR}/${request_file}" "${QQEDIR}/${request_file:1}"
+    done
+}
+
+## Daemon functions
+
+function create_pid_file() {
+    local temp_pid_file=".pid_temp"
+    echo "$1" > "${QQEDIR}/${temp_pid_file}" || {
+        perror "$E_ABORTED_FILE_OPERATION" "${QQEDIR}/${temp_pid_file}"
+        exit "$E_ABORTED_FILE_OPERATION"
+    }
+    mv "${QQEDIR}/${temp_pid_file}" "${QQEDIR}/$pid_file"
+}
+
+function redirect_standart_streams() {
+    [[ -t 0 ]] && exec </dev/null
+    [[ -t 1 ]] && exec >/dev/null
+    [[ -t 2 ]] && exec 2>/dev/null
+}
+
+function close_fds() {
+    eval exec {3..255}\>\&-
+}
+
+function update_queue_status_files() {
+    >"${QQEDIR}/${queue_file}_temp" # cleaning queue file
+    >"${QQEDIR}/${status_file}_temp" # cleaning status file
+    
+    local f=0
+    for rq in "${queue[@]}"; do
+        echo "$rq" >> "${QQEDIR}/${queue_file}_temp"
+        if (( "$f" == 0 )); then
+            echo "downloading: $rq" >> "${QQEDIR}/${status_file}_temp"
+            ((f=1))
+        else
+            echo "$rq" >> "${QQEDIR}/${status_file}_temp"
+        fi
+    done
+
+    mv "${QQEDIR}/${queue_file}_temp" "${QQEDIR}/${queue_file}"
+    mv "${QQEDIR}/${status_file}_temp" "${QQEDIR}/${status_file}"
+}
+
+function dispath_request() {
+    local request_string=$(< "$1")
+    queue["${#queue[@]}"]="$request_string"
+    update_queue_status_files
+}
+
+function check_new_requests() {
+    for file in "${QQEDIR}"/request_*; do
+        if [ -f "$file" ]; then
+            local newfile="`dirname "$file"`/.`basename "$file"`"
+            mv "$file" "$newfile" 
+            dispath_request "$newfile"
+            rm "$newfile"
+        fi
+    done
+}
+            
+function restore_queue() {
+    if [ -f "${QQEDIR}/${queue_file}" ]; then
+        local tempqueue="${queue_file}"_$(date +%s%N)
+        ln "${QQEDIR}/${queue_file}" "${QQEDIR}/${tempqueue}"
+        while read line; do
+            queue["${#queue[@]}"]="$line"
+        done < "${QQEDIR}/${tempqueue}"
+        rm "${QQEDIR}/${tempqueue}"
+    fi
+}
+
+function start_new_loading() {
+    local enq="${queue[0]}"
+    local url=$(echo "$enq" | awk '{ split($1,arr,"="); print arr[2]; }')
+    local referer=$(echo "$enq" | awk '{ split($2,arr,"="); print arr[2]; }')
+    if which "$GETELEMFUNC" &>/dev/null; then
+        local base_dir="${base_downloadpath}"
+        if [ !  -z "$referer" ]; then
+            base_dir="${base_downloadpath}"/"${referer//'/'/_}"
+            arg_referer="--referer=${referer}"
+        fi
+        mkdir --parents "$base_dir"        
+        ${GETELEMFUNC}  --continue --directory-prefix="${base_dir}" --force-directories "$url" "$arg_referer" || {
+            #catching errors
+            local error_code=$?
+            case error_code in
+            1)
+                    echo "Generic error code." >> "${QQEDIR}/${status_file}";;
+            2)
+                    echo "Parse error---for instance, when parsing command-line options, the .wgetrc or .netrc..." >> "${QQEDIR}/${status_file}";;
+            3)
+                    echo "File I/O error." >> "${QQEDIR}/${status_file}";;
+            4)
+                    echo "Network failure." >> "${QQEDIR}/${status_file}";;
+            7)
+                    echo "Protocol errors." >> "${QQEDIR}/${status_file}";;
+            8)
+                    echo "Server issued an error response." >> "${QQEDIR}/${status_file}";;
+            esac
+            exit "$E_BAD_DOWLOAD"
+        }
+        echo $(date +%s) "$needed_referer" "$needed_url" >> "${QQEDIR}/${finished_file}"
+        unset queue[0]
+        queue=( "${queue[@]}" )
+        update_queue_status_files
+    else
+        perror "$E_INVALID_GETELEMFUNC" "${GETELEMFUNC}"
+        exit "$E_INVALID_GETELEMFUNC"
+    fi
+}
+
+
+function daemon_loop() {
+    restore_queue
+    enqueue
+    while true; do
+        check_new_requests
+        if [ "${#queue[@]}" -ne 0 ]; then
+            start_new_loading
+        fi
+        sleep 1
+    done
+}
+
+function daemonize() {
+    (
+        redirect_standart_streams
+        trap '' 1 2
+        cd /
+        close_fds
+        daemon_loop
+    )& 
+    newpid=$!
+    create_pid_file $newpid
+}
+## Main        
+function main() {
+        read_settings
+        process_args "$@"
+
+        if [ ! -d "${QQEDIR}" ]; then
+            mkdir --parents "${QQEDIR}" || {
+                perror "$E_CANNOT_ACCESS_DIRECTORY" "${QQEDIR}"
+                exit  "$E_CANNOT_ACCESS_DIRECTORY"
+            }
+        fi
+            
+        if [ -f "${QQEDIR}/${pid_file}" ] && ps -e | grep $(cat "${QQEDIR}/${pid_file}") | grep -v "grep"; then
+            if [ "${#URLS[@]}" -eq 0 ]; then
+                perror "$E_NO_URL_WITH_STARTED_DAEMON"
+                exit "$E_NO_URL_WITH_STARTED_DAEMON"
+            fi        
+            enqueue            
+        else        
+            daemonize
+        fi
+}
+    
+main "$@"
