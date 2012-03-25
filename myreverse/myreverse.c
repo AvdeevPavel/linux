@@ -93,7 +93,7 @@ int getline_(char **str) {
 			printf("start: %s\n", buffer);
 		#endif
 		
-		if (index != 0) {
+		if (index_ != 0) {
 			indexRead -= index_;
 			memmove(buffer, buffer + index_, indexRead);
 			index_ = 0;
