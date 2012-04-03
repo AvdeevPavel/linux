@@ -82,7 +82,7 @@ char *getStringInBuf(char *buffer, int *len, int *indexRead, int *index_) {
 int getline_(char **str) {
 	static int indexRead = 0; 
 	static int index_ = 0; 	
-	char buffer[BUFSIZE]; 
+	static char buffer[BUFSIZE]; 
 
 	int n_read = 0;
 	int length_ = 0; 
