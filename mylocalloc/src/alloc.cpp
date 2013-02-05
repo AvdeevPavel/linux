@@ -11,7 +11,7 @@
 #include "Heaps/MainHeap.h"
 
 MainHeap* get_main_heap() {
-	static int count_proc = get_count_processors();
+	static int count_proc = 2 * get_count_processors();
 	static double buf[sizeof(MainHeap) / sizeof(double) + 1];
 	static MainHeap *alloc = new (buf) MainHeap(count_proc);
 	return alloc;
@@ -161,30 +161,16 @@ extern "C" {
 		return memalign(0x1000, size);	
 	} 
 
-	typedef void * (*thread_routine) (void *);
 
-	typedef int (*pthread_create_function) (pthread_t *thread, const pthread_attr_t *attr, thread_routine start_routine, void *arg);
-
-	namespace {
-		void *routine_start(void *arg) {
-			get_main_heap();
-			auto pp = reinterpret_cast<std::pair<thread_routine, void *> *>(arg);
-			thread_routine real_routine = pp->first;
-			void *a = pp->second;
-			delete pp; 
-    
-			void *r = nullptr;
-			r = real_routine(a);
-			return r;
-		} 	 	
- 	}
+	typedef int (*pthread_create_function) (pthread_t *thread, const pthread_attr_t *attr, void * (*start_routine)(void *), void *arg);
 
 	int pthread_create(pthread_t *thread, const pthread_attr_t *attr, void * (*start_routine)(void *), void *arg) throw() {
+		get_main_heap();
+
 		char routine_name[] = "pthread_create";
 		static pthread_create_function real_pthread_create = reinterpret_cast<pthread_create_function>(dlsym(RTLD_NEXT, routine_name));
 
-		auto args = new std::pair<thread_routine, void *>(start_routine, arg); 
-		int result = real_pthread_create(thread, attr, routine_start, args);
+		int result = real_pthread_create(thread, attr, start_routine, arg);
 		return result;
 	}
 }
